@@ -1,25 +1,26 @@
 package main
 
 import (
-	"code.google.com/p/go.net/html"
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"code.google.com/p/go.net/html"
 	// "regexp"
 	"bytes"
-	"io"
 	"io/ioutil"
 	"net/url"
-	"os"
 	"runtime"
 	"strconv"
 	"sync"
-	// "time"
+	"time"
 )
 
 var (
-	MAIN_LINK      = "https://www.tastytrade.com"
-	TASTY_BITE_URL = "https://www.tastytrade.com/tt/shows/tasty-bites/episodes?_=1408128889680&locale=en-CA"
+	MAIN_LINK           = "https://www.tastytrade.com"
+	TASTY_BITE_URL      = "https://www.tastytrade.com/tt/shows/tasty-bites/episodes?&locale=en-CA"
+	MARKET_MEASURES_URL = "https://www.tastytrade.com/tt/shows/market-measures/episodes?locale=en-CA"
+	BEST_PRACTICES_URL  = "https://www.tastytrade.com/tt/shows/best-practices/episodes?locale=en-CA"
 
 	ATTR_CLASS       = "class"
 	ATTR_DATA_RETURN = "data-return"
@@ -46,14 +47,18 @@ var (
 	KEY_MEDIA_ID = "mediaId"
 	KEY_PAGE_NUM = "page"
 
-	waitGroup sync.WaitGroup
-
-	tastyShow TastyBiteShow
+	showGroup sync.WaitGroup
+	// TastyBites     TastyTradeShow
+	// MarketMeasures TastyTradeShow
+	shows []TastyTradeShow
 )
 
-type TastyBiteShow struct {
-	Episodes []Episode
-	Pages    string // paginated
+type TastyTradeShow struct {
+	Title    string    `json:"title"`
+	FileName string    `json:"file_name"`
+	Link     string    `json:"link"`
+	Pages    string    `json:"pages"`
+	Episodes []Episode `json:"episodes"`
 }
 type Episode struct {
 	Title     string `json:"title"`
@@ -65,26 +70,20 @@ type Episode struct {
 	Date      string `json:"date"`
 }
 
-type nopCloser struct {
-	io.Reader
-}
-
-func (nopCloser) Close() error { return nil }
-
 func (ep Episode) String() string {
 	val, _ := json.Marshal(ep)
 	return string(val)
 }
 
-func grabTastyBiteEpisodeLinks(page int) {
+func grabEpisodeLinks(show *TastyTradeShow, showURL string, page int) {
 	//pages := 6
-	lastPage := ""
-	tastyurl := TASTY_BITE_URL
+	lastPage := show.Pages
+	fullUrl := showURL
 	if page > 0 {
-		tastyurl = TASTY_BITE_URL + "&page=" + strconv.Itoa(page)
+		fullUrl = showURL + "&page=" + strconv.Itoa(page)
 	}
 
-	response, err := http.Get(tastyurl)
+	response, err := http.Get(fullUrl)
 	if err == nil {
 		defer response.Body.Close()
 		z := html.NewTokenizer(response.Body)
@@ -107,7 +106,7 @@ func grabTastyBiteEpisodeLinks(page int) {
 						z.Next()
 					}
 					episode.Date = z.Token().String()
-					tastyShow.Episodes = append(tastyShow.Episodes, episode)
+					show.Episodes = append(show.Episodes, episode)
 				}
 			} else if token.Data == NODE_LI && len(token.Attr) > 0 && token.Attr[0].Key == ATTR_CLASS && token.Attr[0].Val == TYPE_LAST && lastPage == "" {
 				// Grab how many pages this show has.
@@ -118,46 +117,20 @@ func grabTastyBiteEpisodeLinks(page int) {
 				z.Next()
 				m, _ := url.ParseQuery(z.Token().Attr[0].Val)
 				lastPage = m[KEY_PAGE_NUM][0]
-				tastyShow.Pages = lastPage
+				show.Pages = lastPage
 			}
 		}
 	}
 
 }
 
-func saveToFile(name string, data []byte) {
-	// open output file
-	fo, err := os.Create(name)
-	if err != nil {
-		panic(err)
-	}
-	// close fo on exit and check for its returned error
-	defer func() {
-		if err := fo.Close(); err != nil {
-			panic(err)
-		}
-	}()
-
-	// make a buffer to keep chunks that are read
-	start := 0
-	end := len(data)
-	for {
-		// write a chunk
-		n, _ := fo.Write(data[start:end])
-		start = start + n
-		if start >= end {
-			break
-		}
-	}
-}
-
-func (episode *Episode) grabEpisode() {
+func (episode *Episode) grabEpisode(group *sync.WaitGroup) {
 
 	useDummy := false
 	var data nopCloser
 	var err error
 	var all []byte
-	defer waitGroup.Done()
+	defer group.Done()
 
 	if useDummy {
 		all, err = ioutil.ReadFile("dummy.html")
@@ -212,30 +185,56 @@ func (episode *Episode) grabEpisode() {
 	// fmt.Println(string(d))
 }
 
-func main() {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+func fetchShow(show *TastyTradeShow, URL string) {
 
-	fmt.Println("Grabbing Tasty Bite Links...")
-	grabTastyBiteEpisodeLinks(0)
+	grabEpisodeLinks(show, URL, 0)
 
-	if tastyShow.Pages != "" {
-		pages, _ := strconv.Atoi(tastyShow.Pages)
-		for i := 1; i <= pages; i++ {
-			grabTastyBiteEpisodeLinks(i)
+	var waitGroup sync.WaitGroup
+
+	defer showGroup.Done()
+	fetchEpisodes := func() {
+		for i := 0; i < len(show.Episodes); i++ {
+			if show.Episodes[i].MediaId == "" {
+				waitGroup.Add(1)
+				go show.Episodes[i].grabEpisode(&waitGroup)
+			}
+		}
+		waitGroup.Wait()
+	}
+
+	fmt.Println("Querying " + show.FileName + " ... pg 1")
+	fetchEpisodes()
+
+	if show.Pages != "" {
+		pages, _ := strconv.Atoi(show.Pages)
+		for i := 2; i <= pages; i++ {
+			grabEpisodeLinks(show, URL, i)
+
+			fmt.Println("Querying " + show.FileName + " ... pg " + strconv.Itoa(i))
+			fetchEpisodes()
 		}
 	}
 
-	fmt.Println("Done. --------")
+	b, _ := json.MarshalIndent(show, "", "  ")
+	fmt.Println("Completed: " + show.FileName + " Total Episodes: " + strconv.Itoa(len(show.Episodes)))
+	t := time.Now().Local()
+	fileName := "output/" + t.Format("20060102") + "-" + show.FileName + ".txt"
+	saveToFile(fileName, []byte(b))
+}
 
-	fmt.Println("Querying everything.")
-	for i := 0; i < len(tastyShow.Episodes); i++ {
-		waitGroup.Add(1)
-		go tastyShow.Episodes[i].grabEpisode()
+func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	dat, _ := ioutil.ReadFile("data/archives.json")
+	json.Unmarshal(dat, &shows)
+
+	for i := 0; i < len(shows); i++ {
+		showGroup.Add(1)
+		go fetchShow(&shows[i], shows[i].Link)
 	}
 
-	waitGroup.Wait()
-	b, _ := json.MarshalIndent(tastyShow, "", "  ")
-	//fmt.Println(string(b))
-
-	saveToFile("tasty-bite.txt", []byte(b))
+	showGroup.Wait()
+	// b, _ := json.MarshalIndent(shows, "", "  ")
+	// fmt.Println(string(b))
+	// fetchTastyBite()
+	// fetchMarketMeasures()
 }
