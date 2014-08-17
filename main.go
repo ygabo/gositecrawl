@@ -17,10 +17,7 @@ import (
 )
 
 var (
-	MAIN_LINK           = "https://www.tastytrade.com"
-	TASTY_BITE_URL      = "https://www.tastytrade.com/tt/shows/tasty-bites/episodes?&locale=en-CA"
-	MARKET_MEASURES_URL = "https://www.tastytrade.com/tt/shows/market-measures/episodes?locale=en-CA"
-	BEST_PRACTICES_URL  = "https://www.tastytrade.com/tt/shows/best-practices/episodes?locale=en-CA"
+	MAIN_LINK = "https://www.tastytrade.com"
 
 	ATTR_CLASS       = "class"
 	ATTR_DATA_RETURN = "data-return"
@@ -47,10 +44,8 @@ var (
 	KEY_MEDIA_ID = "mediaId"
 	KEY_PAGE_NUM = "page"
 
-	showGroup sync.WaitGroup
-	// TastyBites     TastyTradeShow
-	// MarketMeasures TastyTradeShow
-	shows []TastyTradeShow
+	shows         []TastyTradeShow
+	showSyncGroup sync.WaitGroup
 )
 
 type TastyTradeShow struct {
@@ -228,13 +223,9 @@ func main() {
 	json.Unmarshal(dat, &shows)
 
 	for i := 0; i < len(shows); i++ {
-		showGroup.Add(1)
+		showSyncGroup.Add(1)
 		go fetchShow(&shows[i], shows[i].Link)
 	}
 
-	showGroup.Wait()
-	// b, _ := json.MarshalIndent(shows, "", "  ")
-	// fmt.Println(string(b))
-	// fetchTastyBite()
-	// fetchMarketMeasures()
+	showSyncGroup.Wait()
 }
